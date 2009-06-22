@@ -1,0 +1,264 @@
+#!/usr/bin/perl
+
+################################################################################
+# check-unused-keys - Perl Script to check unused indexes
+# 
+# @author Ryan Lowe <ryan.a.lowe@percona.com>
+################################################################################
+
+use strict;
+use warnings FATAL => 'all';
+use Pod::Usage;
+use Getopt::Long;
+use English qw(-no_match_vars);
+use DBI;
+
+my $VERSION = '0.0.1';
+my %OPTIONS;
+$OPTIONS{'summary'} = 1;
+
+################################################################################
+# Get configuration information
+################################################################################
+
+# Parse command line opts
+my $gop=new Getopt::Long::Parser;
+$gop->configure('no_ignore_case','bundling');
+if (!$gop->getoptions(
+    'databases|d=s'      => \$OPTIONS{'database' },
+    'help|h'             => \$OPTIONS{'help'     },
+    'hostname|H=s'       => \$OPTIONS{'host'     },
+    'ignore-databases=s' => \$OPTIONS{'ignoredb' },
+    'ignore-indexes=s'   => \$OPTIONS{'ignoreidx'},
+    'ignore-tables=s'    => \$OPTIONS{'ignoretbl'},
+    'options-file=s'     => \$OPTIONS{'def'      },
+    'password|p=s'       => \$OPTIONS{'password' },
+    'port=i'             => \$OPTIONS{'port'     },
+    'socket|s=s'         => \$OPTIONS{'socket'   },
+    'summary!'           => \$OPTIONS{'summary'  },
+    'username|u=s'       => \$OPTIONS{'user'     },
+    'verbose|v+'         => \$OPTIONS{'verbose'  },
+    'version|V'          => \$OPTIONS{'version'  } ) ) {
+
+    pod2usage(2);
+}
+
+# Yay for versions
+if ($OPTIONS{'version'}) {
+    print "$VERSION\n";
+    exit 0;
+}
+
+# Help if asked for or no check given
+pod2usage(2) if     ($OPTIONS{'help'});
+
+# Set global defaults/validate options
+$OPTIONS{'timeout'} = $OPTIONS{'timeout'} ? $OPTIONS{'timeout'} : 10;
+$OPTIONS{'verbose'} = $OPTIONS{'verbose'} ? $OPTIONS{'verbose'} : 0;
+
+################################################################################
+# Begin the main program
+################################################################################
+
+# Set db defaults/validate options
+$OPTIONS{'host'} = $OPTIONS{'host'} ? $OPTIONS{'host'} : 'localhost';
+$OPTIONS{'port'} = $OPTIONS{'port'} ? $OPTIONS{'port'} : '3306';
+$OPTIONS{'def' } = $OPTIONS{'def' } ? $OPTIONS{'def' } : $ENV{'HOME'}.'/.my.cnf';
+
+# Attempt db connection
+my $connection_string  = 'DBI:mysql:';
+$connection_string    .= "host=$OPTIONS{'host'};";
+$connection_string    .= "database=$OPTIONS{'database'};"
+    if $OPTIONS{'database'};
+$connection_string    .= "mysql_socket=$OPTIONS{'socket'};"
+    if $OPTIONS{'socket'} and $OPTIONS{'host'} eq 'localhost';
+$connection_string    .= "port=$OPTIONS{'port'};";
+$connection_string    .= "mysql_read_default_file=$OPTIONS{'def'};";
+$connection_string    .= "mysql_read_default_group=client;";
+$connection_string    .= "mysql_multi_statements=1";
+my $dbh;
+eval {
+    $dbh = DBI->connect (
+        $connection_string,
+        $OPTIONS{'user'},
+        $OPTIONS{'password'},
+        { RaiseError => 1, PrintError => 0 }
+    );
+};
+
+if ( $@ ) {
+    print "Could not connect to MySQL\n";
+    print "\n";
+    print $@ if ($OPTIONS{'verbose'} > 0);
+    exit 1;
+}
+
+# Check to make sure userstats is actually enabled:)
+
+my $sanity_query = 'SHOW GLOBAL VARIABLES LIKE "userstat_running"';
+my $sth = $dbh->prepare($sanity_query);
+$sth->execute();
+
+my $status = $sth->fetchrow_hashref();
+die('userstat is NOT running') unless ($status->{'Value'} eq 'ON'); 
+
+################################################################################
+# Build The Query
+################################################################################
+
+my $query = '
+SELECT DISTINCT `s`.`TABLE_SCHEMA`, `s`.`TABLE_NAME`, `s`.`INDEX_NAME`
+  FROM `information_schema`.`statistics` AS `s` 
+  LEFT JOIN `information_schema`.`index_statistics` AS `i`
+    ON (`s`.`TABLE_SCHEMA` = `i`.`TABLE_SCHEMA` AND 
+        `s`.`TABLE_NAME`   = `i`.`TABLE_NAME` AND
+        `s`.`INDEX_NAME`   = `i`.`INDEX_NAME`)
+  WHERE `i`.`TABLE_SCHEMA` IS NULL
+';
+
+if ($OPTIONS{'database'}) {
+    my @dbs = split(',', $OPTIONS{'database'});
+    $query .= '    AND `s`.`TABLE_SCHEMA` IN ("'.join('","',@dbs).'")
+';
+}
+
+if ($OPTIONS{'ignoredb'}) {
+    my @dbs = split(',', $OPTIONS{'ignoredb'});
+    $query .= '    AND `s`.`TABLE_SCHEMA` NOT IN ("'.join('","',@dbs).'")
+';
+}
+
+if ($OPTIONS{'ignoretbl'}) {
+    my @tbls = split(',', $OPTIONS{'ignoretbl'});
+    
+    foreach (@tbls) {
+        my @a = split(/\./, $_); 
+        $query .= '    AND (`s`.`TABLE_SCHEMA` != "'.$a[0].'" AND `s`.`TABLE_NAME` != "'.$a[1].'")
+';
+    } 
+}
+
+if ($OPTIONS{'ignoreidx'}) {
+    my @idxs = split(',', $OPTIONS{'ignoreidx'});
+
+    foreach (@idxs) {
+        my @a = split(/\./, $_);
+        $query .= '    AND (`s`.`TABLE_SCHEMA` != "'.$a[0].'" AND `s`.`TABLE_NAME` != "'.$a[1].'" AND `s`.`INDEX_NAME` != "'.$a[2].'")
+';
+    }
+}
+
+print $query."\n" if ($OPTIONS{'verbose'} gt 1);
+
+$sth = $dbh->prepare($query);
+$sth->execute();
+
+my $indexes = 0;
+
+while (my $row = $sth->fetchrow_hashref()) {
+    $indexes++;
+    print '# '.$row->{'TABLE_SCHEMA'}.'.'.$row->{'TABLE_NAME'}.'.'.$row->{'INDEX_NAME'}."\n";
+    print 'ALTER TABLE `'.$row->{'TABLE_SCHEMA'}.'`.`'.$row->{'TABLE_NAME'}.
+          '` DROP INDEX `'.$row->{'INDEX_NAME'}."`;\n" if ($OPTIONS{'verbose'} gt 0);
+}
+
+if ($OPTIONS{'summary'} gt 0) {
+    $sth = $dbh->prepare('SHOW GLOBAL STATUS LIKE "Uptime"');
+    $sth->execute();
+    my $ua = $sth->fetchrow_hashref();
+
+    print '
+################################################################################
+# Unused Indexes: '.$indexes.'
+# Uptime: '.$ua->{'Value'}.' seconds
+################################################################################
+';
+}
+
+=pod
+
+=head1 NAME
+
+check-unused-keys - Perl Script to check unused indexes using Percona userstat
+
+=head1 SYNOPSIS
+
+ check-unused-keys [OPTIONS]
+
+ Options:
+   -d, --databases=<dbname>  Comma-separated list of databases to check
+   -h, --help                Display this message and exit
+   -H, --hostname=<hostname> The target MySQL server host
+   --ignore-databases        Comma-separated list of databases to ignore
+   --ignore-indexes          Comma-separated list of indexes to ignore
+                                 db_name.tbl_name.index_name
+   --ignore-tables           Comma-separated list of tables to ignore
+                                 db_name.tbl_name
+   --options-file            The options file to use
+   -p, --password=<password> The password of the MySQL user
+   -i, --port=<portnum>      The port MySQL is listening on
+   -s, --socket=<sockfile>   Use the specified mysql unix socket to connect
+   --[no]summary             Display summary information
+   -u, --username=<username> The MySQL user used to connect
+   -v, --verbose             Increase verbosity level
+   -V, --version             Display version information and exit
+
+ Defaults are:
+
+ ATTRIBUTE                  VALUE
+ -------------------------- ------------------
+ databases                  ALL databases 
+ help                       FALSE
+ hostname                   localhost
+ ignore-databases           No default value
+ ignore-indexes             No default value
+ ignore-tables              No default value
+ options-file               ~/.my.cnf
+ password                   No default value
+ port                       3306
+ socket                     No default value
+ summary                    TRUE
+ username                   No default value
+ verbose                    0 (out of 2)
+ version                    FALSE
+
+=head1 SYSTEM REQUIREMENTS
+
+check-unused-keys requires the following Perl modules:
+
+  Pod::Usage
+  Getopt::Long
+  DBI
+  DBD::mysql
+
+=head1 BUGS
+
+Please report all bugs and feature requests to
+http://code.google.com/p/check-unused-keys
+
+=head1 LICENSE
+
+THIS PROGRAM IS PROVIDED "AS IS" AND WITHOUT ANY EXPRESS OR IMPLIED
+WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTIES OF
+MERCHANTIBILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, version 2; OR the Perl Artistic License.  On UNIX and similar
+systems, you can issue `man perlgpl' or `man perlartistic' to read these
+licenses.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA  02111-1307 USA.
+
+=head1 AUTHOR
+
+Ryan Lowe (ryan.a.lowe@percona.com)
+
+=head1 VERSION
+
+This manual page documents 0.0.1 of check-unused-keys
+
+=cut
+
