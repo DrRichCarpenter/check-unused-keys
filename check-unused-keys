@@ -36,6 +36,7 @@ if (!$gop->getoptions(
     'port=i'             => \$OPTIONS{'port'     },
     'socket|s=s'         => \$OPTIONS{'socket'   },
     'summary!'           => \$OPTIONS{'summary'  },
+    'tables|t=s'         => \$OPTIONS{'tables'   },
     'username|u=s'       => \$OPTIONS{'user'     },
     'verbose|v+'         => \$OPTIONS{'verbose'  },
     'version|V'          => \$OPTIONS{'version'  } ) ) {
@@ -148,6 +149,16 @@ if ($OPTIONS{'ignoreidx'}) {
     }
 }
 
+if ($OPTIONS{'tables'}) {
+    my @tbls = split(/\./, $OPTIONS{'tables'});
+
+    foreach (@tbls) {
+        my @a = split(/\./, $_);
+        $query .= '    AND (`s`.`TABLE_SCHEMA` = "'.$a[0].'" AND `s`.`TABLE_NAME` = "'.$a[1].'")
+';
+    }
+}
+
 print $query."\n" if ($OPTIONS{'verbose'} gt 1);
 
 $sth = $dbh->prepare($query);
@@ -198,6 +209,8 @@ check-unused-keys - Perl Script to check unused indexes using Percona userstat
    -p, --password=<password> The password of the MySQL user
    -i, --port=<portnum>      The port MySQL is listening on
    -s, --socket=<sockfile>   Use the specified mysql unix socket to connect
+   -t, --tables=<tables>     Comma-separated list of tables to evaluate
+                                 db_name.tbl_name
    --[no]summary             Display summary information
    -u, --username=<username> The MySQL user used to connect
    -v, --verbose             Increase verbosity level
@@ -218,6 +231,7 @@ check-unused-keys - Perl Script to check unused indexes using Percona userstat
  port                       3306
  socket                     No default value
  summary                    TRUE
+ tables                     No Default Value
  username                   No default value
  verbose                    0 (out of 2)
  version                    FALSE
