@@ -112,7 +112,7 @@ my $sth = $dbh->prepare($sanity_query);
 $sth->execute();
 
 my $status = $sth->fetchrow_hashref();
-die('userstat is NOT running') unless ($status->{'Value'} eq 'ON'); 
+die('userstat is NOT running') unless (defined($status->{'Value'}) and $status->{'Value'} eq 'ON'); 
 
 ################################################################################
 # Build The Query
