@@ -28,6 +28,7 @@ $gop->configure('no_ignore_case','bundling');
 if (!$gop->getoptions(
     'create-alter!'        => \$OPTIONS{'createalter'   },
     'databases|d=s'        => \$OPTIONS{'database'      },
+    'flush-tables!'        => \$OPTIONS{'flush'         },
     'help|h'               => \$OPTIONS{'help'          },
     'hostname|H=s'         => \$OPTIONS{'host'          },
     'ignore-databases=s'   => \$OPTIONS{'ignoredb'      },
@@ -113,6 +114,10 @@ $sth->execute();
 
 my $status = $sth->fetchrow_hashref();
 die('userstat is NOT running') unless (defined($status->{'Value'}) and $status->{'Value'} eq 'ON'); 
+
+if ($OPTIONS{'flush'}) {
+    $dbh->do('FLUSH TABLES');
+}
 
 ################################################################################
 # Build The Query
